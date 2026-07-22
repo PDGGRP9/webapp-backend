@@ -1,27 +1,147 @@
 name: CD
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: ["*.*.*"]
+  push:
+    tags: ['*.*.*']
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Run Django tests
+        working-directory: backend
+        run: python manage.py test
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - service: backend
+            context: .
+            dockerfile: backend/Dockerfile
+          - service: frontend
+            context: ./frontend
+            dockerfile: frontend/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: false
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - service: backend
+            context: .
+            dockerfile: backend/Dockerfile
+          - service: frontend
+            context: ./frontend
+            dockerfile: frontend/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute lowercase image name
+        id: image
+        run: echo "name=${REGISTRY}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/webapp-${{ matrix.service }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log into GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=ref,event=tag
+            type=sha
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  smoke-test:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start the stack
+        run: docker compose up -d --build
+
+      - name: Wait for backend to be ready
+        run: |
+          for i in $(seq 1 15); do
+            curl -sf http://127.0.0.1:8000/api/pulses/ && break
+            echo "backend not ready yet, retrying..."
+            sleep 2
+          done
+
+      - name: Check backend JSON endpoint
+        run: curl -sf http://127.0.0.1:8000/api/pulses/
+
+      - name: Check backend HTML endpoint
+        run: curl -sf http://127.0.0.1:8000/api/
+
+      - name: Check frontend
+        run: curl -sf http://127.0.0.1:8080/
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down
+
   deploy:
-    if: github.event.workflow_run.conclusion == 'success'
+    needs: smoke-test
     runs-on: ubuntu-latest
     steps:
       - name: Deployment placeholder
         run: |
           OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
-          REF='${{ github.event.workflow_run.head_branch }}'
-          SHA='${{ github.event.workflow_run.head_sha }}'
-          IMAGE_TAG="$REF"
+          REF='${{ github.ref_name }}'
+          SHA='${{ github.sha }}'
 
-          echo "CI succeeded on ${REF} (commit ${SHA})."
+          echo "CD succeeded on tag ${REF} (commit ${SHA})."
           echo "Images published:"
-          echo "  ghcr.io/${OWNER}/webapp-backend:${IMAGE_TAG}"
-          echo "  ghcr.io/${OWNER}/webapp-frontend:${IMAGE_TAG}"
+          echo "  ghcr.io/${OWNER}/webapp-backend:${REF}"
+          echo "  ghcr.io/${OWNER}/webapp-frontend:${REF}"
           echo "  ghcr.io/${OWNER}/webapp-backend:${SHA}"
           echo "  ghcr.io/${OWNER}/webapp-frontend:${SHA}"
           echo ""
