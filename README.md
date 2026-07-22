@@ -13,8 +13,10 @@ The following command create a Sqlite database, because Django requires several 
 The second command launch the deploiement server in a local web app. It is accessible through `localhost:8000/api/<route>`
 
 ```sh
-python3 manage.py migrate
-python3 manage.py runserver
+python3 manage.py migrate         # applies DB migrations
+python3 manage.py check           # "check" — Django's system check framework (settings, models, urls)
+python3 manage.py test            # runs api/tests.py (currently just the empty TestCase scaffold)
+
 ```
 
 
