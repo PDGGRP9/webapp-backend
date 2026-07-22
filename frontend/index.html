@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>pulses</title>
+    <style>
+        body { font-family: sans-serif; margin: 2rem; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ccc; padding: 8px 12px; text-align: left; }
+        th { background: #f4f4f4; }
+    </style>
+</head>
+<body>
+    <h1>Liste des s</h1>
+    <table>
+        <thead>
+            <tr><th>ID</th><th>Pulse 1</th><th>Pulse 2</th><th>Pulse 3</th></tr>
+        </thead>
+        <tbody id="corps-tableau"></tbody>
+    </table>
+
+    <script>
+        async function loadPulses() {
+            const reponse = await fetch("http://127.0.0.1:8000/api/pulses/");
+            const data = await reponse.json();
+            const corps = document.getElementById("corps-tableau");
+            corps.innerHTML = "";
+            for (const p of data.loadPulses) {
+                const l = document.createElement("tr");
+                l.innerHTML = `
+                    <td>${p.id}</td>
+                    <td>${p.p1} bpm</td>
+                    <td>${p.p2} bpm</td>
+                    <td>${p.p3} bpm</td>
+                `;
+                corps.appendChild(l);
+            }
+        }
+        loadPulses();
+    </script>
+</body>
+</html>
