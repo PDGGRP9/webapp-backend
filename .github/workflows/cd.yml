@@ -4,7 +4,7 @@ on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
-    branches: ["main", "*.*.*"]
+    branches: ["*.*.*"]
 
 jobs:
   deploy:
@@ -16,12 +16,7 @@ jobs:
           OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
           REF='${{ github.event.workflow_run.head_branch }}'
           SHA='${{ github.event.workflow_run.head_sha }}'
-
-          if [ "$REF" = "main" ]; then
-            IMAGE_TAG="latest"
-          else
-            IMAGE_TAG="$REF"
-          fi
+          IMAGE_TAG="$REF"
 
           echo "CI succeeded on ${REF} (commit ${SHA})."
           echo "Images published:"
