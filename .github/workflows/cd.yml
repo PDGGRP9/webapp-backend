@@ -1,0 +1,31 @@
+name: CD
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deployment placeholder
+        run: |
+          echo "CI succeeded on main (commit ${{ github.event.workflow_run.head_sha }})."
+          echo "Images published:"
+          echo "  ghcr.io/pdggrp9/webapp-backend:${{ github.event.workflow_run.head_sha }}"
+          echo "  ghcr.io/pdggrp9/webapp-frontend:${{ github.event.workflow_run.head_sha }}"
+          echo ""
+          echo "No deployment target is configured yet."
+          echo "To deploy for real, on the target server run:"
+          echo "  docker compose pull && docker compose up -d"
+          echo ""
+          # TODO: once a server exists, replace this step with an SSH deploy, e.g.:
+          #   - uses: appleboy/ssh-action@v1
+          #     with:
+          #       host: \${{ secrets.SSH_HOST }}
+          #       username: \${{ secrets.SSH_USER }}
+          #       key: \${{ secrets.SSH_KEY }}
+          #       script: cd /path/to/app && docker compose pull && docker compose up -d

@@ -18,6 +18,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Display the data stored in the "data" folder
 CSV_PATH = BASE_DIR / "data" / "pulsations.csv"
 
+# The frontend lives in its own folder, as a sibling of backend/
+FRONTEND_DIR = BASE_DIR.parent / "frontend"
+
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
@@ -59,6 +62,8 @@ MIDDLEWARE = [
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5500",
     "http://127.0.0.1:5500",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
 ]
 
 ROOT_URLCONF = 'app.urls'
@@ -66,7 +71,7 @@ ROOT_URLCONF = 'app.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [FRONTEND_DIR],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
