@@ -24,15 +24,6 @@ jobs:
   build:
     needs: test
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - service: backend
-            context: .
-            dockerfile: backend/Dockerfile
-          - service: frontend
-            context: ./frontend
-            dockerfile: frontend/Dockerfile
     steps:
       - uses: actions/checkout@v4
 
@@ -40,8 +31,8 @@ jobs:
 
       - uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
+          context: .
+          file: backend/Dockerfile
           push: false
 
   publish:
@@ -50,21 +41,12 @@ jobs:
     permissions:
       contents: read
       packages: write
-    strategy:
-      matrix:
-        include:
-          - service: backend
-            context: .
-            dockerfile: backend/Dockerfile
-          - service: frontend
-            context: ./frontend
-            dockerfile: frontend/Dockerfile
     steps:
       - uses: actions/checkout@v4
 
       - name: Compute lowercase image name
         id: image
-        run: echo "name=${REGISTRY}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/webapp-${{ matrix.service }}" >> "$GITHUB_OUTPUT"
+        run: echo "name=${REGISTRY}/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/webapp-backend" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -86,8 +68,8 @@ jobs:
 
       - uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
+          context: .
+          file: backend/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -106,19 +88,13 @@ jobs:
       - name: Wait for backend to be ready
         run: |
           for i in $(seq 1 15); do
-            curl -sf http://127.0.0.1:8000/api/pulses/ && break
+            curl -sf http://127.0.0.1:8000/api/health && break
             echo "backend not ready yet, retrying..."
             sleep 2
           done
 
-      - name: Check backend JSON endpoint
-        run: curl -sf http://127.0.0.1:8000/api/pulses/
-
-      - name: Check backend HTML endpoint
-        run: curl -sf http://127.0.0.1:8000/api/
-
-      - name: Check frontend
-        run: curl -sf http://127.0.0.1:8080/
+      - name: Check backend health endpoint
+        run: curl -sf http://127.0.0.1:8000/api/health
 
       - name: Show logs on failure
         if: failure()
@@ -141,9 +117,7 @@ jobs:
           echo "CD succeeded on tag ${REF} (commit ${SHA})."
           echo "Images published:"
           echo "  ghcr.io/${OWNER}/webapp-backend:${REF}"
-          echo "  ghcr.io/${OWNER}/webapp-frontend:${REF}"
           echo "  ghcr.io/${OWNER}/webapp-backend:${SHA}"
-          echo "  ghcr.io/${OWNER}/webapp-frontend:${SHA}"
           echo ""
           echo "No deployment target is configured yet."
           echo "To deploy for real, on the target server run:"

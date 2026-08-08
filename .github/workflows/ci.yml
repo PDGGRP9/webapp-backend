@@ -29,15 +29,6 @@ jobs:
   build:
     needs: test
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - service: backend
-            context: .
-            dockerfile: backend/Dockerfile
-          - service: frontend
-            context: ./frontend
-            dockerfile: frontend/Dockerfile
     steps:
       - uses: actions/checkout@v4
 
@@ -45,6 +36,6 @@ jobs:
 
       - uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
+          context: .
+          file: backend/Dockerfile
           push: false
