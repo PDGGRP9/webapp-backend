@@ -20,24 +20,14 @@ jobs:
           python-version: "3.10"
 
       - name: Install backend dependencies
-        run: pip install -r backend/requirements.txt
+        run: pip install -r ./requirements.txt
 
       - name: Run Django tests
-        working-directory: backend
         run: python manage.py test
 
   build:
     needs: test
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - service: backend
-            context: .
-            dockerfile: backend/Dockerfile
-          - service: frontend
-            context: ./frontend
-            dockerfile: frontend/Dockerfile
     steps:
       - uses: actions/checkout@v4
 
@@ -45,6 +35,6 @@ jobs:
 
       - uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
+          context: .
+          file: ./Dockerfile
           push: false
