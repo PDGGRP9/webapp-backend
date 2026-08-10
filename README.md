@@ -27,8 +27,11 @@ GET /api/health
 POST /api/register
 POST /api/login
 POST /api/logout
+GET /api/me
 
-`/api/register` crée un utilisateur minimal. `/api/login` renvoie un token signé que le front peut garder côté client. `/api/logout` est volontairement stateless pour rester simple à consommer par web et Android.
+`/api/register` crée un utilisateur minimal. `/api/login` renvoie un token signé que le front peut garder côté client. `/api/logout` est volontairement stateless pour rester simple à consommer par web et Android. `/api/me` (Bearer token requis) renvoie l'utilisateur courant ou 401 si le token est absent/expiré/invalide — utilisé par le front pour valider une session stockée avant d'afficher l'app.
+
+`/api/login` accepte aussi bien les mots de passe hashés par Django (`/api/register`, PBKDF2) que les hashs bcrypt bruts (`$2a$`/`$2b$`) que le seed d'`infra-db` écrit via `pgcrypto`/`crypt()` — ces deux formats de hash ne s'auto-détectent pas de la même façon, voir `_verify_password` dans `api/views.py`.
 
 ### Bracelets
 

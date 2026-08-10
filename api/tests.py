@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import bcrypt
 from django.db import connection
 from django.test import TestCase
+from django.utils import timezone
 
 
 def _create_schema() -> None:
@@ -90,6 +92,51 @@ class BackendApiTests(TestCase):
 			HTTP_AUTHORIZATION=f"Bearer {login_response.json()['token']}",
 		)
 		self.assertEqual(logout_response.status_code, 200)
+
+	def test_me_requires_valid_token(self):
+		register_response = self.client.post(
+			"/api/register",
+			data='{"email":"me@example.com","username":"me","password":"secret"}',
+			content_type="application/json",
+		)
+		token = register_response.json()["user"]["token"]
+
+		unauthenticated_response = self.client.get("/api/me")
+		self.assertEqual(unauthenticated_response.status_code, 401)
+
+		authenticated_response = self.client.get("/api/me", HTTP_AUTHORIZATION=f"Bearer {token}")
+		self.assertEqual(authenticated_response.status_code, 200)
+		self.assertEqual(authenticated_response.json()["user"]["email"], "me@example.com")
+
+		garbage_token_response = self.client.get("/api/me", HTTP_AUTHORIZATION="Bearer not-a-real-token")
+		self.assertEqual(garbage_token_response.status_code, 401)
+
+	def test_login_accepts_raw_bcrypt_hash_from_db_seed(self):
+		# infra-db seeds demo accounts via Postgres pgcrypto's crypt()/gen_salt('bf'),
+		# which writes a raw "$2b$..." bcrypt hash with no algorithm prefix — a format
+		# Django's own check_password() does not recognize. Insert a user the same way
+		# (bypassing /api/register, which would hash with Django's PBKDF2 instead) to
+		# make sure /api/login still authenticates them.
+		raw_hash = bcrypt.hashpw(b"demo1234", bcrypt.gensalt(rounds=4)).decode("ascii")
+		now = timezone.now().isoformat()
+		with connection.cursor() as cursor:
+			cursor.execute(
+				"""
+				INSERT INTO users (
+					email, username, password_hash, first_name, last_name,
+					is_active, is_staff, is_superuser, created_at, updated_at
+				) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+				""",
+				["seed@example.com", "seeduser", raw_hash, "Seed", "User", True, False, False, now, now],
+			)
+
+		login_response = self.client.post(
+			"/api/login",
+			data='{"email":"seed@example.com","password":"demo1234"}',
+			content_type="application/json",
+		)
+		self.assertEqual(login_response.status_code, 200)
+		self.assertIn("token", login_response.json())
 
 	def test_pair_datas_and_statistics(self):
 		self.client.post(
