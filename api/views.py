@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import bcrypt
 from django.contrib.auth.hashers import check_password, make_password
 from django.core import signing
 from django.db import IntegrityError, connection, transaction
@@ -12,6 +13,18 @@ from django.views.decorators.http import require_http_methods
 
 TOKEN_SALT = "pdg.braceletconnecte.auth"
 TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24 * 7
+
+# infra-db seeds demo accounts with Postgres pgcrypto's crypt()/gen_salt('bf'),
+# which produces raw bcrypt hashes ($2a$/$2b$/$2y$, no algorithm prefix). Django's
+# check_password only recognizes its own "bcrypt$<hash>"-prefixed encoding, so
+# those seeded hashes need to be verified directly against bcrypt instead.
+_BCRYPT_PREFIXES = ("$2a$", "$2b$", "$2y$")
+
+
+def _verify_password(raw_password: str, stored_hash: str) -> bool:
+    if stored_hash.startswith(_BCRYPT_PREFIXES):
+        return bcrypt.checkpw(raw_password.encode("utf-8"), stored_hash.encode("utf-8"))
+    return check_password(raw_password, stored_hash)
 
 
 def _json_response(payload: dict[str, object], status: int = 200) -> JsonResponse:
@@ -130,6 +143,23 @@ def _get_user_by_email(email: str):  # noqa: ANN001
             "created_at": row[9],
             "updated_at": row[10],
         }
+
+
+def _get_user_by_id(user_id: int):  # noqa: ANN001
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, email, username, password_hash, first_name, last_name,
+                   is_active, is_staff, is_superuser, created_at, updated_at
+            FROM users
+            WHERE id = %s
+            """,
+            [user_id],
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_user(row)
 
 
 def _get_bracelet_by_identifier(device_uid: str | None, serial_number: str | None):
@@ -339,7 +369,7 @@ def login(request):  # noqa: ANN001
     user = _get_user_by_email(str(payload["email"]))
     if user is None or not user["is_active"]:
         return _json_response({"detail": "Invalid credentials"}, status=401)
-    if not check_password(str(payload["password"]), str(user["password_hash"])):
+    if not _verify_password(str(payload["password"]), str(user["password_hash"])):
         return _json_response({"detail": "Invalid credentials"}, status=401)
 
     public_user = {key: value for key, value in user.items() if key != "password_hash"}
@@ -350,6 +380,19 @@ def login(request):  # noqa: ANN001
 def logout(request):  # noqa: ANN001
     token_data = _decode_token_from_request(request)
     return _json_response({"detail": "Logged out", "token": token_data})
+
+
+@require_http_methods(["GET"])
+def me(request):  # noqa: ANN001
+    token_data = _decode_token_from_request(request)
+    if token_data is None:
+        return _json_response({"detail": "Invalid or expired token"}, status=401)
+
+    user = _get_user_by_id(int(token_data["user_id"]))
+    if user is None or not user["is_active"]:
+        return _json_response({"detail": "Invalid or expired token"}, status=401)
+
+    return _json_response({"user": user})
 
 
 @require_http_methods(["POST"])
