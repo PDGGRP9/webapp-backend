@@ -586,7 +586,7 @@ def datas_by_user(request, user_id: int):  # noqa: ANN001
         return _json_response({"detail": "User not found"}, status=404)
 
     limit = int(request.GET.get("limit", "100"))
-    limit = max(1, min(limit, 500))
+    limit = max(1, min(limit, 5000))
     offset = max(0, int(request.GET.get("offset", "0")))
 
     with connection.cursor() as cursor:
