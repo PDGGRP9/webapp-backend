@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import codecs
+
 import bcrypt
 from django.db import connection
 from django.test import TestCase
 from django.utils import timezone
+
+from api.views import MEASUREMENT_EXPORT_FIELDS
 
 
 def _create_schema() -> None:
@@ -175,3 +179,110 @@ class BackendApiTests(TestCase):
 		statistics_response = self.client.get("/api/statistics/1")
 		self.assertEqual(statistics_response.status_code, 200)
 		self.assertEqual(statistics_response.json()["statistics"]["measurements_count"], 1)
+
+	def test_delete_my_data_requires_auth(self):
+		unauthenticated_response = self.client.delete("/api/me/data")
+		self.assertEqual(unauthenticated_response.status_code, 401)
+
+	def test_delete_my_data_wipes_measurements_but_keeps_bracelet_and_account(self):
+		register_response = self.client.post(
+			"/api/register",
+			data='{"email":"wipe@example.com","username":"wipe","password":"secret"}',
+			content_type="application/json",
+		)
+		token = register_response.json()["user"]["token"]
+		user_id = register_response.json()["user"]["id"]
+
+		self.client.post(
+			"/api/bracelets/pair",
+			data=(
+				f'{{"user_id":{user_id},"device_uid":"22222222-2222-2222-2222-222222222222",'
+				'"serial_number":"BR-002","display_name":"Bracelet wipe"}'
+			),
+			content_type="application/json",
+		)
+		self.client.post(
+			"/api/datas",
+			data=(
+				'{"device_uid":"22222222-2222-2222-2222-222222222222",'
+				'"serial_number":"BR-002","display_name":"Bracelet wipe",'
+				'"captured_at":"2026-08-08T10:00:00Z","heart_rate_bpm":80,'
+				'"step_count":5}'
+			),
+			content_type="application/json",
+		)
+
+		delete_response = self.client.delete("/api/me/data", HTTP_AUTHORIZATION=f"Bearer {token}")
+		self.assertEqual(delete_response.status_code, 200)
+		self.assertEqual(delete_response.json()["deleted_measurements"], 1)
+
+		datas_response = self.client.get(f"/api/datas/{user_id}")
+		self.assertEqual(datas_response.json()["count"], 0)
+
+		bracelets_response = self.client.get(f"/api/bracelets/{user_id}")
+		self.assertEqual(len(bracelets_response.json()["bracelets"]), 1)
+		self.assertEqual(bracelets_response.json()["bracelets"][0]["serial_number"], "BR-002")
+
+		me_response = self.client.get("/api/me", HTTP_AUTHORIZATION=f"Bearer {token}")
+		self.assertEqual(me_response.status_code, 200)
+		self.assertEqual(me_response.json()["user"]["email"], "wipe@example.com")
+
+	def test_export_my_data_requires_auth(self):
+		unauthenticated_response = self.client.get("/api/me/data/export")
+		self.assertEqual(unauthenticated_response.status_code, 401)
+
+	def test_export_my_data_json_and_csv(self):
+		register_response = self.client.post(
+			"/api/register",
+			data='{"email":"export@example.com","username":"export","password":"secret"}',
+			content_type="application/json",
+		)
+		token = register_response.json()["user"]["token"]
+		user_id = register_response.json()["user"]["id"]
+
+		self.client.post(
+			"/api/bracelets/pair",
+			data=(
+				f'{{"user_id":{user_id},"device_uid":"33333333-3333-3333-3333-333333333333",'
+				'"serial_number":"BR-003","display_name":"Bracelet export"}'
+			),
+			content_type="application/json",
+		)
+		self.client.post(
+			"/api/datas",
+			data=(
+				'{"device_uid":"33333333-3333-3333-3333-333333333333",'
+				'"serial_number":"BR-003","display_name":"Bracelet export",'
+				'"captured_at":"2026-08-08T10:00:00Z","heart_rate_bpm":90,'
+				'"step_count":42}'
+			),
+			content_type="application/json",
+		)
+
+		json_response = self.client.get("/api/me/data/export", HTTP_AUTHORIZATION=f"Bearer {token}")
+		self.assertEqual(json_response.status_code, 200)
+		payload = json_response.json()
+		self.assertEqual(payload["user"]["email"], "export@example.com")
+		self.assertEqual(len(payload["measurements"]), 1)
+		measurement = payload["measurements"][0]
+		self.assertEqual(measurement["heart_rate_bpm"], 90)
+		self.assertEqual(measurement["bracelet_serial_number"], "BR-003")
+
+		csv_response = self.client.get(
+			"/api/me/data/export?format=csv", HTTP_AUTHORIZATION=f"Bearer {token}"
+		)
+		self.assertEqual(csv_response.status_code, 200)
+		self.assertEqual(csv_response["Content-Type"], "text/csv; charset=utf-8")
+		body = csv_response.content.decode("utf-8-sig")
+		header_row = body.splitlines()[0]
+		# Séparateur ';' requis pour qu'Excel (localisation FR) ouvre bien le fichier en colonnes.
+		self.assertEqual(header_row.split(";"), MEASUREMENT_EXPORT_FIELDS)
+		data_row = body.splitlines()[1].split(";")
+		self.assertEqual(data_row[MEASUREMENT_EXPORT_FIELDS.index("heart_rate_bpm")], "90")
+		self.assertEqual(data_row[MEASUREMENT_EXPORT_FIELDS.index("bracelet_serial_number")], "BR-003")
+		self.assertTrue(csv_response.content.startswith(codecs.BOM_UTF8))
+
+		invalid_format_response = self.client.get(
+			"/api/me/data/export?format=xml", HTTP_AUTHORIZATION=f"Bearer {token}"
+		)
+		self.assertEqual(invalid_format_response.status_code, 400)

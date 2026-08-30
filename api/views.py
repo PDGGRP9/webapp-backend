@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
+import re
 
 import bcrypt
 from django.contrib.auth.hashers import check_password, make_password
 from django.core import signing
 from django.db import IntegrityError, connection, transaction
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
@@ -20,11 +23,24 @@ TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24 * 7
 # those seeded hashes need to be verified directly against bcrypt instead.
 _BCRYPT_PREFIXES = ("$2a$", "$2b$", "$2y$")
 
+_UPPERCASE_RE = re.compile(r"[A-Z]")
+_SPECIAL_CHAR_RE = re.compile(r"[^A-Za-z0-9]")
+
 
 def _verify_password(raw_password: str, stored_hash: str) -> bool:
     if stored_hash.startswith(_BCRYPT_PREFIXES):
         return bcrypt.checkpw(raw_password.encode("utf-8"), stored_hash.encode("utf-8"))
     return check_password(raw_password, stored_hash)
+
+
+def _password_strength_error(password: str) -> str | None:
+    if len(password) < 8:
+        return "Le mot de passe doit contenir au moins 8 caractères."
+    if not _UPPERCASE_RE.search(password):
+        return "Le mot de passe doit contenir au moins une majuscule."
+    if not _SPECIAL_CHAR_RE.search(password):
+        return "Le mot de passe doit contenir au moins un caractère spécial."
+    return None
 
 
 def _json_response(payload: dict[str, object], status: int = 200) -> JsonResponse:
@@ -396,6 +412,56 @@ def me(request):  # noqa: ANN001
 
 
 @require_http_methods(["POST"])
+def check_email(request):  # noqa: ANN001
+    try:
+        payload = _parse_json(request)
+    except ValueError as exc:
+        return _json_response({"detail": str(exc)}, status=400)
+
+    missing = _required(payload, ["email"])
+    if missing:
+        return _json_response({"detail": "Missing required fields", "missing": missing}, status=400)
+
+    user = _get_user_by_email(str(payload["email"]))
+    if user is None or not user["is_active"]:
+        return _json_response({"detail": "Utilisateur introuvable"}, status=404)
+
+    return _json_response({"exists": True})
+
+
+@require_http_methods(["POST"])
+def reset_password(request):  # noqa: ANN001
+    try:
+        payload = _parse_json(request)
+    except ValueError as exc:
+        return _json_response({"detail": str(exc)}, status=400)
+
+    missing = _required(payload, ["email", "password", "password_confirm"])
+    if missing:
+        return _json_response({"detail": "Missing required fields", "missing": missing}, status=400)
+
+    if payload["password"] != payload["password_confirm"]:
+        return _json_response({"detail": "Les mots de passe ne correspondent pas"}, status=400)
+
+    strength_error = _password_strength_error(str(payload["password"]))
+    if strength_error:
+        return _json_response({"detail": strength_error}, status=400)
+
+    user = _get_user_by_email(str(payload["email"]))
+    if user is None or not user["is_active"]:
+        return _json_response({"detail": "Utilisateur introuvable"}, status=404)
+
+    now = timezone.now().isoformat()
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE users SET password_hash = %s, updated_at = %s WHERE id = %s",
+            [make_password(str(payload["password"])), now, user["id"]],
+        )
+
+    return _json_response({"detail": "Mot de passe mis à jour"})
+
+
+@require_http_methods(["POST"])
 def pair_bracelet(request):  # noqa: ANN001
     try:
         payload = _parse_json(request)
@@ -520,7 +586,7 @@ def datas_by_user(request, user_id: int):  # noqa: ANN001
         return _json_response({"detail": "User not found"}, status=404)
 
     limit = int(request.GET.get("limit", "100"))
-    limit = max(1, min(limit, 500))
+    limit = max(1, min(limit, 5000))
     offset = max(0, int(request.GET.get("offset", "0")))
 
     with connection.cursor() as cursor:
@@ -561,6 +627,120 @@ def datas_by_user(request, user_id: int):  # noqa: ANN001
             for row in cursor.fetchall()
         ]
     return _json_response({"user_id": user_id, "count": len(datas), "datas": datas})
+
+
+@require_http_methods(["DELETE"])
+def delete_my_data(request):  # noqa: ANN001
+    token_data = _decode_token_from_request(request)
+    if token_data is None:
+        return _json_response({"detail": "Invalid or expired token"}, status=401)
+
+    user_id = int(token_data["user_id"])
+    if not _ensure_user_exists(user_id):
+        return _json_response({"detail": "Invalid or expired token"}, status=401)
+
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM biometrics_measurements
+                WHERE bracelet_id IN (SELECT id FROM bracelets WHERE user_id = %s)
+                """,
+                [user_id],
+            )
+            deleted_measurements = cursor.rowcount
+
+    return _json_response(
+        {
+            "detail": "All data deleted",
+            "deleted_measurements": deleted_measurements,
+        }
+    )
+
+
+MEASUREMENT_EXPORT_FIELDS = [
+    "id",
+    "captured_at",
+    "heart_rate_bpm",
+    "spo2_percent",
+    "step_count",
+    "motion_level",
+    "signal_quality",
+    "source_topic",
+    "received_at",
+    "created_at",
+    "bracelet_device_uid",
+    "bracelet_serial_number",
+    "bracelet_display_name",
+]
+
+
+def _export_measurements(user_id: int) -> list[dict[str, object]]:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT m.id, m.captured_at, m.heart_rate_bpm, m.spo2_percent, m.step_count,
+                   m.motion_level, m.signal_quality, m.source_topic, m.received_at, m.created_at,
+                   b.device_uid, b.serial_number, b.display_name
+            FROM biometrics_measurements m
+            INNER JOIN bracelets b ON b.id = m.bracelet_id
+            WHERE b.user_id = %s
+            ORDER BY m.captured_at ASC
+            """,
+            [user_id],
+        )
+        return [
+            {
+                "id": row[0],
+                "captured_at": row[1],
+                "heart_rate_bpm": row[2],
+                "spo2_percent": row[3],
+                "step_count": row[4],
+                "motion_level": row[5],
+                "signal_quality": row[6],
+                "source_topic": row[7],
+                "received_at": row[8],
+                "created_at": row[9],
+                "bracelet_device_uid": row[10],
+                "bracelet_serial_number": row[11],
+                "bracelet_display_name": row[12],
+            }
+            for row in cursor.fetchall()
+        ]
+
+
+@require_http_methods(["GET"])
+def export_my_data(request):  # noqa: ANN001
+    token_data = _decode_token_from_request(request)
+    if token_data is None:
+        return _json_response({"detail": "Invalid or expired token"}, status=401)
+
+    user_id = int(token_data["user_id"])
+    user = _get_user_by_id(user_id)
+    if user is None:
+        return _json_response({"detail": "Invalid or expired token"}, status=401)
+
+    export_format = request.GET.get("format", "json").lower()
+    if export_format not in ("json", "csv"):
+        return _json_response({"detail": "Unsupported format, use 'json' or 'csv'"}, status=400)
+
+    measurements = _export_measurements(user_id)
+
+    if export_format == "csv":
+        buffer = io.StringIO()
+        # Excel (notamment en localisation FR) n'ouvre un .csv en colonnes que s'il est
+        # séparé par ';' — avec ',' il met tout dans une seule colonne A. Le BOM UTF-8
+        # en préfixe est aussi nécessaire pour qu'Excel affiche correctement les accents.
+        writer = csv.DictWriter(buffer, fieldnames=MEASUREMENT_EXPORT_FIELDS, delimiter=";")
+        writer.writeheader()
+        writer.writerows(measurements)
+        response = HttpResponse("\ufeff" + buffer.getvalue(), content_type="text/csv; charset=utf-8")
+        response["Content-Disposition"] = 'attachment; filename="mes-donnees.csv"'
+        return response
+
+    response = JsonResponse({"user": user, "measurements": measurements})
+    response["Content-Disposition"] = 'attachment; filename="mes-donnees.json"'
+    return response
 
 
 @require_http_methods(["GET"])

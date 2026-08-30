@@ -33,6 +33,15 @@ GET /api/me
 
 `/api/login` accepte aussi bien les mots de passe hashés par Django (`/api/register`, PBKDF2) que les hashs bcrypt bruts (`$2a$`/`$2b$`) que le seed d'`infra-db` écrit via `pgcrypto`/`crypt()` — ces deux formats de hash ne s'auto-détectent pas de la même façon, voir `_verify_password` dans `api/views.py`.
 
+### Données personnelles (RGPD)
+
+DELETE /api/me/data
+GET /api/me/data/export
+
+`/api/me/data` (Bearer token requis) supprime définitivement toutes les mesures biométriques de l'utilisateur authentifié. Le bracelet reste appairé au compte, seules les mesures sont effacées. Action irréversible.
+
+`/api/me/data/export` (Bearer token requis) exporte le profil et les mesures de l'utilisateur authentifié. Paramètre `?format=json` (défaut) ou `?format=csv` ; la réponse est envoyée en pièce jointe (`Content-Disposition: attachment`). En CSV, une colonne par attribut, séparateur `;` (et BOM UTF-8) pour être lisible directement par Excel FR. En JSON, `{"user": {...}, "measurements": [{...}, ...]}` où chaque mesure est un objet plat regroupant tous ses champs (mêmes champs que les colonnes CSV, y compris les infos du bracelet préfixées `bracelet_*`).
+
 ### Bracelets
 
 POST /api/bracelets/pair
