@@ -11,6 +11,19 @@ SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-pdg-backend-dev-key")
 DEBUG = os.getenv("DEBUG", "true").lower() == "true"
 ALLOWED_HOSTS = [host.strip() for host in os.getenv("ALLOWED_HOSTS", "*").split(",") if host.strip()]
 
+# --- HTTPS derrière un reverse proxy (Caddy) --------------------------------
+# Le proxy termine le TLS et transmet le protocole d'origine dans un en-tête.
+# Format attendu : "HTTP_X_FORWARDED_PROTO,https".
+_ssl_header = os.getenv("SECURE_PROXY_SSL_HEADER", "").strip()
+if _ssl_header and "," in _ssl_header:
+    _name, _value = (part.strip() for part in _ssl_header.split(",", 1))
+    SECURE_PROXY_SSL_HEADER = (_name, _value)
+
+# HSTS : 0 = désactivé. Passer à 31536000 une fois le HTTPS stable.
+SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "0"))
+if SECURE_HSTS_SECONDS:
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+
 INSTALLED_APPS = [
     "corsheaders",
     "api",
