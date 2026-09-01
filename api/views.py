@@ -81,23 +81,6 @@ def _row_to_user(row: tuple[object, ...]) -> dict[str, object]:
     }
 
 
-def _row_to_bracelet(row: tuple[object, ...]) -> dict[str, object]:
-    return {
-        "id": row[0],
-        "user_id": row[1],
-        "device_uid": row[2],
-        "serial_number": row[3],
-        "display_name": row[4],
-        "firmware_version": row[5],
-        "mac_address": row[6],
-        "status": row[7],
-        "paired_at": row[8],
-        "last_seen_at": row[9],
-        "created_at": row[10],
-        "updated_at": row[11],
-    }
-
-
 def _issue_token(user: dict[str, object]) -> str:
     payload = {
         "user_id": user["id"],
@@ -178,99 +161,37 @@ def _get_user_by_id(user_id: int):  # noqa: ANN001
         return _row_to_user(row)
 
 
-def _get_bracelet_by_identifier(device_uid: str | None, serial_number: str | None):
-    clauses = []
-    params: list[object] = []
-    if device_uid:
-        clauses.append("device_uid = %s")
-        params.append(device_uid)
-    if serial_number:
-        clauses.append("serial_number = %s")
-        params.append(serial_number)
-    if not clauses:
-        return None
+def _row_to_measurement(row: tuple[object, ...]) -> dict[str, object]:
+    return {
+        "id": row[0],
+        "captured_at": row[1],
+        "heart_rate_bpm": row[2],
+        "spo2_percent": row[3],
+        "step_count": row[4],
+        "motion_level": row[5],
+        "signal_quality": row[6],
+        "raw_payload": row[7],
+        "source_topic": row[8],
+        "received_at": row[9],
+        "created_at": row[10],
+        # Kept as a nested object (rather than flattened fields) so the web and
+        # Android clients — written against the old bracelets-table response —
+        # don't need to change: it's just the device columns of this same row.
+        "bracelet": {
+            "device_uid": row[11],
+            "serial_number": row[12],
+            "display_name": row[13],
+        },
+    }
 
-    query = f"""
-        SELECT id, user_id, device_uid, serial_number, display_name, firmware_version,
-               mac_address, status, paired_at, last_seen_at, created_at, updated_at
-        FROM bracelets
-        WHERE {' OR '.join(clauses)}
-        ORDER BY id ASC
-        LIMIT 1
+
+def _insert_measurement(user_id: int, payload: dict[str, object]) -> dict[str, object]:
+    """A measurement belongs to whoever posted it — the authenticated user, not
+    a paired device. device_uid/serial_number/mac_address are kept as plain
+    descriptive columns (which physical bracelet produced this reading), not a
+    foreign key: nothing to pair, unpair, or reassign when a user switches
+    bracelets, since the BLE link only ever talks to one bracelet at a time.
     """
-    with connection.cursor() as cursor:
-        cursor.execute(query, params)
-        row = cursor.fetchone()
-        return _row_to_bracelet(row) if row is not None else None
-
-
-def _upsert_bracelet(payload: dict[str, object]) -> dict[str, object]:
-    now = timezone.now().isoformat()
-    device_uid = payload.get("device_uid")
-    serial_number = payload.get("serial_number")
-    display_name = payload.get("display_name", "Bracelet de test")
-    firmware_version = payload.get("firmware_version")
-    mac_address = payload.get("mac_address")
-
-    existing = _get_bracelet_by_identifier(device_uid, serial_number)
-    with connection.cursor() as cursor:
-        if existing is None:
-            cursor.execute(
-                """
-                INSERT INTO bracelets (
-                    user_id, device_uid, serial_number, display_name,
-                    firmware_version, mac_address, status, paired_at,
-                    last_seen_at, created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id, user_id, device_uid, serial_number, display_name, firmware_version,
-                          mac_address, status, paired_at, last_seen_at, created_at, updated_at
-                """,
-                [
-                    None,
-                    device_uid,
-                    serial_number,
-                    display_name,
-                    firmware_version,
-                    mac_address,
-                    "active",
-                    None,
-                    now,
-                    now,
-                    now,
-                ],
-            )
-        else:
-            cursor.execute(
-                """
-                UPDATE bracelets
-                SET serial_number = %s,
-                    display_name = %s,
-                    firmware_version = %s,
-                    mac_address = %s,
-                    last_seen_at = %s,
-                    updated_at = %s
-                WHERE id = %s
-                RETURNING id, user_id, device_uid, serial_number, display_name, firmware_version,
-                          mac_address, status, paired_at, last_seen_at, created_at, updated_at
-                """,
-                [
-                    serial_number,
-                    display_name,
-                    firmware_version,
-                    mac_address,
-                    now,
-                    now,
-                    existing["id"],
-                ],
-            )
-
-        row = cursor.fetchone()
-        if row is None:
-            raise RuntimeError("Unable to persist bracelet")
-        return _row_to_bracelet(row)
-
-
-def _insert_measurement(bracelet_id: int, payload: dict[str, object]) -> dict[str, object]:
     now = timezone.now().isoformat()
     captured_at = payload.get("captured_at") or now
     raw_payload = json.dumps(payload)
@@ -278,14 +199,20 @@ def _insert_measurement(bracelet_id: int, payload: dict[str, object]) -> dict[st
         cursor.execute(
             """
             INSERT INTO biometrics_measurements (
-                bracelet_id, captured_at, heart_rate_bpm, spo2_percent, step_count,
+                user_id, device_uid, serial_number, display_name, mac_address,
+                captured_at, heart_rate_bpm, spo2_percent, step_count,
                 motion_level, signal_quality, raw_payload, source_topic, received_at, created_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id, bracelet_id, captured_at, heart_rate_bpm, spo2_percent, step_count,
-                      motion_level, signal_quality, raw_payload, source_topic, received_at, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id, captured_at, heart_rate_bpm, spo2_percent, step_count,
+                      motion_level, signal_quality, raw_payload, source_topic, received_at, created_at,
+                      device_uid, serial_number, display_name
             """,
             [
-                bracelet_id,
+                user_id,
+                payload.get("device_uid"),
+                payload.get("serial_number"),
+                payload.get("display_name"),
+                payload.get("mac_address"),
                 captured_at,
                 payload.get("heart_rate_bpm"),
                 payload.get("spo2_percent"),
@@ -301,20 +228,7 @@ def _insert_measurement(bracelet_id: int, payload: dict[str, object]) -> dict[st
         row = cursor.fetchone()
         if row is None:
             raise RuntimeError("Unable to persist measurement")
-        return {
-            "id": row[0],
-            "bracelet_id": row[1],
-            "captured_at": row[2],
-            "heart_rate_bpm": row[3],
-            "spo2_percent": row[4],
-            "step_count": row[5],
-            "motion_level": row[6],
-            "signal_quality": row[7],
-            "raw_payload": row[8],
-            "source_topic": row[9],
-            "received_at": row[10],
-            "created_at": row[11],
-        }
+        return _row_to_measurement(row)
 
 
 @require_http_methods(["GET"])
@@ -462,122 +376,29 @@ def reset_password(request):  # noqa: ANN001
 
 
 @require_http_methods(["POST"])
-def pair_bracelet(request):  # noqa: ANN001
-    try:
-        payload = _parse_json(request)
-    except ValueError as exc:
-        return _json_response({"detail": str(exc)}, status=400)
-
-    missing = _required(payload, ["user_id", "device_uid", "serial_number"])
-    if missing:
-        return _json_response({"detail": "Missing required fields", "missing": missing}, status=400)
-
-    user_id = int(payload["user_id"])
-    if not _ensure_user_exists(user_id):
-        return _json_response({"detail": "User not found"}, status=404)
-
-    now = timezone.now().isoformat()
-    existing = _get_bracelet_by_identifier(str(payload["device_uid"]), str(payload["serial_number"]))
-    if existing is not None and existing["user_id"] not in (None, user_id):
-        return _json_response({"detail": "Bracelet already paired to another user"}, status=409)
-
-    with transaction.atomic():
-        with connection.cursor() as cursor:
-            if existing is None:
-                cursor.execute(
-                    """
-                    INSERT INTO bracelets (
-                        user_id, device_uid, serial_number, display_name, firmware_version,
-                        mac_address, status, paired_at, last_seen_at, created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id, user_id, device_uid, serial_number, display_name, firmware_version,
-                              mac_address, status, paired_at, last_seen_at, created_at, updated_at
-                    """,
-                    [
-                        user_id,
-                        payload["device_uid"],
-                        payload["serial_number"],
-                        payload.get("display_name", "Bracelet de test"),
-                        payload.get("firmware_version"),
-                        payload.get("mac_address"),
-                        payload.get("status", "active"),
-                        now,
-                        now,
-                        now,
-                        now,
-                    ],
-                )
-            else:
-                cursor.execute(
-                    """
-                    UPDATE bracelets
-                    SET user_id = %s,
-                        serial_number = %s,
-                        display_name = %s,
-                        firmware_version = %s,
-                        mac_address = %s,
-                        status = %s,
-                        paired_at = COALESCE(paired_at, %s),
-                        updated_at = %s
-                    WHERE id = %s
-                    RETURNING id, user_id, device_uid, serial_number, display_name, firmware_version,
-                              mac_address, status, paired_at, last_seen_at, created_at, updated_at
-                    """,
-                    [
-                        user_id,
-                        payload["serial_number"],
-                        payload.get("display_name", "Bracelet de test"),
-                        payload.get("firmware_version"),
-                        payload.get("mac_address"),
-                        payload.get("status", "active"),
-                        now,
-                        now,
-                        existing["id"],
-                    ],
-                )
-            row = cursor.fetchone()
-
-    if row is None:
-        return _json_response({"detail": "Unable to pair bracelet"}, status=500)
-    return _json_response({"bracelet": _row_to_bracelet(row)}, status=201 if existing is None else 200)
-
-
-@require_http_methods(["GET"])
-def list_bracelets(request, user_id: int):  # noqa: ANN001
-    if not _ensure_user_exists(user_id):
-        return _json_response({"detail": "User not found"}, status=404)
-
-    with connection.cursor() as cursor:
-        cursor.execute(
-            """
-            SELECT id, user_id, device_uid, serial_number, display_name, firmware_version,
-                   mac_address, status, paired_at, last_seen_at, created_at, updated_at
-            FROM bracelets
-            WHERE user_id = %s
-            ORDER BY created_at DESC
-            """,
-            [user_id],
-        )
-        bracelets = [_row_to_bracelet(row) for row in cursor.fetchall()]
-    return _json_response({"bracelets": bracelets})
-
-
-@require_http_methods(["POST"])
 def datas_collection(request):  # noqa: ANN001
+    """Posts one measurement for the currently logged-in user.
+
+    There is no separate pairing step: whoever the Bearer token belongs to
+    owns the measurement. The BLE app only ever talks to one bracelet at a
+    time, so this is unambiguous — and a user can send readings from as many
+    different physical bracelets as they like, nothing to appair/désappairer.
+    """
+    token_data = _decode_token_from_request(request)
+    if token_data is None:
+        return _json_response({"detail": "Invalid or expired token"}, status=401)
+
+    user_id = int(token_data["user_id"])
+    if not _ensure_user_exists(user_id):
+        return _json_response({"detail": "Invalid or expired token"}, status=401)
+
     try:
         payload = _parse_json(request)
     except ValueError as exc:
         return _json_response({"detail": str(exc)}, status=400)
 
-    missing = _required(payload, ["device_uid", "serial_number"])
-    if missing:
-        return _json_response({"detail": "Missing required fields", "missing": missing}, status=400)
-
-    with transaction.atomic():
-        bracelet = _upsert_bracelet(payload)
-        measurement = _insert_measurement(int(bracelet["id"]), payload)
-
-    return _json_response({"bracelet": bracelet, "measurement": measurement}, status=201)
+    measurement = _insert_measurement(user_id, payload)
+    return _json_response({"measurement": measurement}, status=201)
 
 
 @require_http_methods(["GET"])
@@ -592,40 +413,17 @@ def datas_by_user(request, user_id: int):  # noqa: ANN001
     with connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT m.id, m.bracelet_id, m.captured_at, m.heart_rate_bpm, m.spo2_percent,
-                   m.step_count, m.motion_level, m.signal_quality, m.raw_payload,
-                   m.source_topic, m.received_at, m.created_at,
-                   b.device_uid, b.serial_number, b.display_name
-            FROM biometrics_measurements m
-            INNER JOIN bracelets b ON b.id = m.bracelet_id
-            WHERE b.user_id = %s
-            ORDER BY m.captured_at DESC
+            SELECT id, captured_at, heart_rate_bpm, spo2_percent, step_count,
+                   motion_level, signal_quality, raw_payload, source_topic,
+                   received_at, created_at, device_uid, serial_number, display_name
+            FROM biometrics_measurements
+            WHERE user_id = %s
+            ORDER BY captured_at DESC
             LIMIT %s OFFSET %s
             """,
             [user_id, limit, offset],
         )
-        datas = [
-            {
-                "id": row[0],
-                "bracelet_id": row[1],
-                "captured_at": row[2],
-                "heart_rate_bpm": row[3],
-                "spo2_percent": row[4],
-                "step_count": row[5],
-                "motion_level": row[6],
-                "signal_quality": row[7],
-                "raw_payload": row[8],
-                "source_topic": row[9],
-                "received_at": row[10],
-                "created_at": row[11],
-                "bracelet": {
-                    "device_uid": row[12],
-                    "serial_number": row[13],
-                    "display_name": row[14],
-                },
-            }
-            for row in cursor.fetchall()
-        ]
+        datas = [_row_to_measurement(row) for row in cursor.fetchall()]
     return _json_response({"user_id": user_id, "count": len(datas), "datas": datas})
 
 
@@ -642,10 +440,7 @@ def delete_my_data(request):  # noqa: ANN001
     with transaction.atomic():
         with connection.cursor() as cursor:
             cursor.execute(
-                """
-                DELETE FROM biometrics_measurements
-                WHERE bracelet_id IN (SELECT id FROM bracelets WHERE user_id = %s)
-                """,
+                "DELETE FROM biometrics_measurements WHERE user_id = %s",
                 [user_id],
             )
             deleted_measurements = cursor.rowcount
@@ -679,13 +474,12 @@ def _export_measurements(user_id: int) -> list[dict[str, object]]:
     with connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT m.id, m.captured_at, m.heart_rate_bpm, m.spo2_percent, m.step_count,
-                   m.motion_level, m.signal_quality, m.source_topic, m.received_at, m.created_at,
-                   b.device_uid, b.serial_number, b.display_name
-            FROM biometrics_measurements m
-            INNER JOIN bracelets b ON b.id = m.bracelet_id
-            WHERE b.user_id = %s
-            ORDER BY m.captured_at ASC
+            SELECT id, captured_at, heart_rate_bpm, spo2_percent, step_count,
+                   motion_level, signal_quality, source_topic, received_at, created_at,
+                   device_uid, serial_number, display_name
+            FROM biometrics_measurements
+            WHERE user_id = %s
+            ORDER BY captured_at ASC
             """,
             [user_id],
         )
@@ -760,11 +554,7 @@ def statistics_by_user(request, user_id: int):  # noqa: ANN001
                 MAX(step_count) AS max_step_count,
                 MAX(captured_at) AS last_measurement_at
             FROM biometrics_measurements
-            WHERE bracelet_id IN (
-                SELECT id
-                FROM bracelets
-                WHERE user_id = %s
-            )
+            WHERE user_id = %s
             """,
             [user_id],
         )

@@ -31,28 +31,13 @@ def _create_schema() -> None:
 		)
 		cursor.execute(
 			"""
-			CREATE TABLE IF NOT EXISTS bracelets (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				user_id INTEGER UNIQUE,
-				device_uid TEXT NOT NULL UNIQUE,
-				serial_number TEXT NOT NULL UNIQUE,
-				display_name TEXT NOT NULL,
-				firmware_version TEXT,
-				mac_address TEXT,
-				status TEXT NOT NULL DEFAULT 'active',
-				paired_at TEXT,
-				last_seen_at TEXT,
-				created_at TEXT NOT NULL,
-				updated_at TEXT NOT NULL,
-				FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
-			)
-			"""
-		)
-		cursor.execute(
-			"""
 			CREATE TABLE IF NOT EXISTS biometrics_measurements (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				bracelet_id INTEGER NOT NULL,
+				user_id INTEGER NOT NULL,
+				device_uid TEXT,
+				serial_number TEXT,
+				display_name TEXT,
+				mac_address TEXT,
 				captured_at TEXT NOT NULL,
 				heart_rate_bpm INTEGER,
 				spo2_percent NUMERIC(5, 2),
@@ -63,7 +48,7 @@ def _create_schema() -> None:
 				source_topic TEXT,
 				received_at TEXT NOT NULL,
 				created_at TEXT NOT NULL,
-				FOREIGN KEY(bracelet_id) REFERENCES bracelets(id) ON DELETE CASCADE
+				FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 			)
 			"""
 		)
@@ -142,21 +127,26 @@ class BackendApiTests(TestCase):
 		self.assertEqual(login_response.status_code, 200)
 		self.assertIn("token", login_response.json())
 
-	def test_pair_datas_and_statistics(self):
-		self.client.post(
+	def test_datas_requires_auth(self):
+		# There is no pairing step any more: POST /api/datas attaches the
+		# measurement to whoever the Bearer token belongs to, so a request
+		# without one (or with an invalid one) must be rejected outright —
+		# otherwise anyone could post data to any device_uid/serial_number.
+		unauthenticated_response = self.client.post(
+			"/api/datas",
+			data='{"device_uid":"11111111-1111-1111-1111-111111111111","serial_number":"BR-001"}',
+			content_type="application/json",
+		)
+		self.assertEqual(unauthenticated_response.status_code, 401)
+
+	def test_post_datas_and_read_back_datas_and_statistics(self):
+		register_response = self.client.post(
 			"/api/register",
 			data='{"email":"user@example.com","username":"user","password":"secret"}',
 			content_type="application/json",
 		)
-		pair_response = self.client.post(
-			"/api/bracelets/pair",
-			data=(
-				'{"user_id":1,"device_uid":"11111111-1111-1111-1111-111111111111",'
-				'"serial_number":"BR-001","display_name":"Bracelet test"}'
-			),
-			content_type="application/json",
-		)
-		self.assertEqual(pair_response.status_code, 201)
+		token = register_response.json()["user"]["token"]
+		user_id = register_response.json()["user"]["id"]
 
 		datas_response = self.client.post(
 			"/api/datas",
@@ -165,26 +155,54 @@ class BackendApiTests(TestCase):
 				'"serial_number":"BR-001","display_name":"Bracelet test",'
 				'"captured_at":"2026-08-08T10:00:00Z","heart_rate_bpm":72,'
 				'"spo2_percent":98.2,"step_count":12,"motion_level":0.45,'
-				'"signal_quality":90,"source_topic":"api/test",'
-				'"raw_payload":{"sequence":1}}'
+				'"signal_quality":90,"source_topic":"api/test"}'
 			),
 			content_type="application/json",
+			HTTP_AUTHORIZATION=f"Bearer {token}",
 		)
 		self.assertEqual(datas_response.status_code, 201)
+		self.assertEqual(datas_response.json()["measurement"]["bracelet"]["serial_number"], "BR-001")
 
-		list_response = self.client.get("/api/datas/1")
+		list_response = self.client.get(f"/api/datas/{user_id}")
 		self.assertEqual(list_response.status_code, 200)
 		self.assertEqual(list_response.json()["count"], 1)
 
-		statistics_response = self.client.get("/api/statistics/1")
+		statistics_response = self.client.get(f"/api/statistics/{user_id}")
 		self.assertEqual(statistics_response.status_code, 200)
 		self.assertEqual(statistics_response.json()["statistics"]["measurements_count"], 1)
+
+	def test_a_user_can_post_from_several_different_bracelets(self):
+		# The whole point of dropping the bracelets table: no pairing means no
+		# "one bracelet per account" limit either. Two different device_uid /
+		# serial_number values, same token, both land on the same user.
+		register_response = self.client.post(
+			"/api/register",
+			data='{"email":"multi@example.com","username":"multi","password":"secret"}',
+			content_type="application/json",
+		)
+		token = register_response.json()["user"]["token"]
+		user_id = register_response.json()["user"]["id"]
+
+		for device_uid, serial_number in (
+			("11111111-1111-1111-1111-111111111111", "BR-A"),
+			("22222222-2222-2222-2222-222222222222", "BR-B"),
+		):
+			response = self.client.post(
+				"/api/datas",
+				data=f'{{"device_uid":"{device_uid}","serial_number":"{serial_number}","step_count":1}}',
+				content_type="application/json",
+				HTTP_AUTHORIZATION=f"Bearer {token}",
+			)
+			self.assertEqual(response.status_code, 201)
+
+		list_response = self.client.get(f"/api/datas/{user_id}")
+		self.assertEqual(list_response.json()["count"], 2)
 
 	def test_delete_my_data_requires_auth(self):
 		unauthenticated_response = self.client.delete("/api/me/data")
 		self.assertEqual(unauthenticated_response.status_code, 401)
 
-	def test_delete_my_data_wipes_measurements_but_keeps_bracelet_and_account(self):
+	def test_delete_my_data_wipes_measurements_but_keeps_account(self):
 		register_response = self.client.post(
 			"/api/register",
 			data='{"email":"wipe@example.com","username":"wipe","password":"secret"}',
@@ -194,14 +212,6 @@ class BackendApiTests(TestCase):
 		user_id = register_response.json()["user"]["id"]
 
 		self.client.post(
-			"/api/bracelets/pair",
-			data=(
-				f'{{"user_id":{user_id},"device_uid":"22222222-2222-2222-2222-222222222222",'
-				'"serial_number":"BR-002","display_name":"Bracelet wipe"}'
-			),
-			content_type="application/json",
-		)
-		self.client.post(
 			"/api/datas",
 			data=(
 				'{"device_uid":"22222222-2222-2222-2222-222222222222",'
@@ -210,6 +220,7 @@ class BackendApiTests(TestCase):
 				'"step_count":5}'
 			),
 			content_type="application/json",
+			HTTP_AUTHORIZATION=f"Bearer {token}",
 		)
 
 		delete_response = self.client.delete("/api/me/data", HTTP_AUTHORIZATION=f"Bearer {token}")
@@ -218,10 +229,6 @@ class BackendApiTests(TestCase):
 
 		datas_response = self.client.get(f"/api/datas/{user_id}")
 		self.assertEqual(datas_response.json()["count"], 0)
-
-		bracelets_response = self.client.get(f"/api/bracelets/{user_id}")
-		self.assertEqual(len(bracelets_response.json()["bracelets"]), 1)
-		self.assertEqual(bracelets_response.json()["bracelets"][0]["serial_number"], "BR-002")
 
 		me_response = self.client.get("/api/me", HTTP_AUTHORIZATION=f"Bearer {token}")
 		self.assertEqual(me_response.status_code, 200)
@@ -238,16 +245,7 @@ class BackendApiTests(TestCase):
 			content_type="application/json",
 		)
 		token = register_response.json()["user"]["token"]
-		user_id = register_response.json()["user"]["id"]
 
-		self.client.post(
-			"/api/bracelets/pair",
-			data=(
-				f'{{"user_id":{user_id},"device_uid":"33333333-3333-3333-3333-333333333333",'
-				'"serial_number":"BR-003","display_name":"Bracelet export"}'
-			),
-			content_type="application/json",
-		)
 		self.client.post(
 			"/api/datas",
 			data=(
@@ -257,6 +255,7 @@ class BackendApiTests(TestCase):
 				'"step_count":42}'
 			),
 			content_type="application/json",
+			HTTP_AUTHORIZATION=f"Bearer {token}",
 		)
 
 		json_response = self.client.get("/api/me/data/export", HTTP_AUTHORIZATION=f"Bearer {token}")
