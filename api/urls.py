@@ -15,6 +15,4 @@ urlpatterns = [
     path("datas", views.datas_collection, name="datas-collection"),
     path("datas/<int:user_id>", views.datas_by_user, name="datas-by-user"),
     path("statistics/<int:user_id>", views.statistics_by_user, name="statistics-by-user"),
-    path("bracelets/pair", views.pair_bracelet, name="pair-bracelet"),
-    path("bracelets/<int:user_id>", views.list_bracelets, name="list-bracelets"),
 ]
